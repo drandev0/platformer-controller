@@ -19,6 +19,7 @@ public sealed class PlatformerPlayerController : Component
 	[Property] public string JumpAction { get; set; } = "Jump";
 	[Property] public string RunAction { get; set; } = "Run";
 	[Property] public string DuckAction { get; set; } = "Duck";
+	[Property] public bool UseAnalogMoveInput { get; set; } = false;
 
 	[Header( "Movement" )]
 	[Property] public float WalkSpeed { get; set; } = 285.0f;
@@ -193,13 +194,13 @@ public sealed class PlatformerPlayerController : Component
 
 	private float GetMoveInput()
 	{
-		var input = Input.AnalogMove.x;
+		// Keep movement strictly horizontal. The template input can put W/S into
+		// AnalogMove, so analog movement is opt-in. By default, only Left/Right
+		// actions move the player and W/S do nothing.
+		var input = UseAnalogMoveInput ? Input.AnalogMove.x : 0.0f;
 
-		if ( MathF.Abs( input ) < 0.01f )
-		{
-			if ( IsActionDown( RightAction ) ) input += 1.0f;
-			if ( IsActionDown( LeftAction ) ) input -= 1.0f;
-		}
+		if ( IsActionDown( RightAction ) ) input += 1.0f;
+		if ( IsActionDown( LeftAction ) ) input -= 1.0f;
 
 		input = Math.Clamp( input, -1.0f, 1.0f );
 		return MathF.Abs( input ) < InputDeadZone ? 0.0f : input;

@@ -119,7 +119,8 @@
         "CameraLooksAtPlayer": true,
         "UseCharacterControllerPunchForJump": true,
         "JumpUngroundNudge": 2,
-        "PostJumpGroundGraceTime": 0.12
+        "PostJumpGroundGraceTime": 0.12,
+        "UseAnalogMoveInput": false
       }
     ],
     "Children": [
