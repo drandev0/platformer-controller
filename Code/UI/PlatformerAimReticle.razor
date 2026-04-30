@@ -1,0 +1,23 @@
+@using Sandbox;
+@using Sandbox.UI;
+@using System;
+@inherits PanelComponent
+
+<div class="platformer-aim-reticle @VisibilityClass" style="left: @(ReticlePosition.x)px; top: @(ReticlePosition.y)px;">
+	<div class="reticle-line horizontal"></div>
+	<div class="reticle-line vertical"></div>
+	<div class="reticle-core"></div>
+</div>
+
+@code
+{
+	public Vector2 Position { get; set; }
+	public bool IsVisible { get; set; }
+	private string VisibilityClass => IsVisible ? "visible" : "hidden";
+	private Vector2 ReticlePosition => Panel?.ScreenPositionToPanelPosition( Position ) ?? Position;
+
+	protected override int BuildHash()
+	{
+		return HashCode.Combine( IsVisible, (int)Position.x, (int)Position.y, (int)Screen.Width, (int)Screen.Height );
+	}
+}

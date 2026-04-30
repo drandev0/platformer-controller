@@ -1,13 +1,7 @@
 using System;
 using Sandbox.Citizen;
+using Sandbox.UI;
 
-/// <summary>
-/// A compact, inspector-friendly 2.5D platformer controller for s&box.
-///
-/// Put this on the Player root with a CharacterController. Keep the Citizen model as a child.
-/// Movement reads Input.AnalogMove.x first, with configurable named-action fallbacks.
-/// The controller also drives the CitizenAnimationHelper on the skinned model child.
-/// </summary>
 public sealed class PlatformerPlayerController : Component
 {
 	[Property, RequireComponent]
@@ -19,6 +13,7 @@ public sealed class PlatformerPlayerController : Component
 	[Property] public string JumpAction { get; set; } = "Jump";
 	[Property] public string RunAction { get; set; } = "Run";
 	[Property] public string DuckAction { get; set; } = "Duck";
+	[Property] public string AttackAction { get; set; } = "Attack1";
 	[Property] public bool UseAnalogMoveInput { get; set; } = false;
 
 	[Header( "Movement" )]
@@ -61,11 +56,24 @@ public sealed class PlatformerPlayerController : Component
 	[Property] public float CameraDeadZoneZ { get; set; } = 4.0f;
 	[Property] public bool SnapCameraOnStart { get; set; } = true;
 
+	[Header( "Mouse Camera" )]
+	[Property] public bool MouseCameraEnabled { get; set; } = true;
+	[Property] public Vector2 MouseCameraMaxOffset { get; set; } = new Vector2( 260.0f, 145.0f );
+	[Property] public Vector2 MouseCameraScreenDeadZone { get; set; } = new Vector2( 0.06f, 0.08f );
+	[Property] public float MouseCameraSharpness { get; set; } = 9.0f;
+	[Property] public float MouseCameraReturnSharpness { get; set; } = 13.0f;
+	[Property] public bool ShowScreenReticle { get; set; } = true;
+	[Property] public bool HideSystemCursorForReticle { get; set; } = true;
+	[Property] public PlatformerAimReticle AimReticle { get; set; }
+
 	[Header( "2.5D Lock" )]
 	[Property] public bool LockDepthAxis { get; set; } = true;
 	[Property] public float LockedDepthY { get; set; } = 0.0f;
 
 	[Header( "Visuals" )]
+	[Property] public bool FaceMousePosition { get; set; } = true;
+	[Property] public Vector3 MouseLookOriginOffset { get; set; } = new Vector3( 0.0f, 0.0f, 48.0f );
+	[Property] public float MouseFacingDeadZone { get; set; } = 2.0f;
 	[Property] public bool FaceMoveDirection { get; set; } = true;
 	[Property] public float VisualTurnSharpness { get; set; } = 18.0f;
 	[Property] public GameObject VisualRoot { get; set; }
@@ -79,6 +87,12 @@ public sealed class PlatformerPlayerController : Component
 	[Property] public float AnimationDuckLerpSpeed { get; set; } = 10.0f;
 	[Property] public bool AutoAssignCitizenAnimationTarget { get; set; } = true;
 
+	[Header( "Weapons" )]
+	[Property] public PlatformerWeapon StartingWeapon { get; set; }
+	[Property] public GameObject StartingWeaponPrefab { get; set; }
+	[Property] public PlatformerMeleeWeapon DefaultMeleeWeapon { get; set; }
+	[Property] public bool AutoCreateDefaultMeleeWeapon { get; set; } = true;
+
 	[Header( "Respawn" )]
 	[Property] public bool RespawnWhenFalling { get; set; } = true;
 	[Property] public float KillZ { get; set; } = -500.0f;
@@ -89,6 +103,9 @@ public sealed class PlatformerPlayerController : Component
 	public Vector3 Velocity => Controller?.Velocity ?? Vector3.Zero;
 	public float MoveInput => moveInput;
 	public float Facing => facing;
+	public PlatformerWeapon EquippedWeapon => equippedWeapon;
+	public bool HasMouseAimPoint => hasMouseWorldSample;
+	public Vector3 MouseAimPoint => mouseWorldPoint;
 	public bool IsRunActive => IsRunHeld && MathF.Abs( moveInput ) > InputDeadZone;
 	public bool IsJumpHeld => jumpHeld;
 	public bool IsDuckHeld => duckHeld;
@@ -107,6 +124,16 @@ public sealed class PlatformerPlayerController : Component
 	private float smoothedCameraLookAhead;
 	private float animationDuckLevel;
 	private Vector3 lastSafeGroundPosition;
+	private Vector3 lookDirection = Vector3.Forward;
+	private Vector2 mouseScreenPosition;
+	private Vector2 mouseScreenDelta;
+	private Vector3 mouseWorldPoint;
+	private Vector3 smoothedMouseCameraOffset;
+	private bool hasMouseScreenSample;
+	private bool hasMouseWorldSample;
+	private GameObject runtimeReticleObject;
+	private GameObject runtimeWeaponObject;
+	private PlatformerWeapon equippedWeapon;
 
 	private bool IsRunHeld => !string.IsNullOrWhiteSpace( RunAction ) && Input.Down( RunAction );
 
@@ -130,10 +157,37 @@ public sealed class PlatformerPlayerController : Component
 		lastSafeGroundPosition = RespawnPoint;
 		airJumpsRemaining = ExtraAirJumps;
 		smoothedCameraLookAhead = facing * CameraLookAhead;
+		EnsureAimReticle();
+		EquipStartingWeapon();
 
 		if ( SnapCameraOnStart )
 		{
 			SnapCamera();
+		}
+	}
+
+	protected override void OnDisabled()
+	{
+		if ( AimReticle is not null )
+		{
+			AimReticle.IsVisible = false;
+		}
+
+		Mouse.Visibility = MouseVisibility.Auto;
+	}
+
+	protected override void OnDestroy()
+	{
+		if ( runtimeReticleObject is not null && runtimeReticleObject.IsValid() )
+		{
+			runtimeReticleObject.Destroy();
+			runtimeReticleObject = null;
+		}
+
+		if ( runtimeWeaponObject is not null && runtimeWeaponObject.IsValid() )
+		{
+			runtimeWeaponObject.Destroy();
+			runtimeWeaponObject = null;
 		}
 	}
 
@@ -153,7 +207,11 @@ public sealed class PlatformerPlayerController : Component
 			TryCutJumpShort();
 		}
 
+		UpdateMouseSample();
+		UpdateFacing();
+		UpdateWeaponInput();
 		UpdateCamera( false );
+		UpdateReticle();
 		UpdateCitizenAnimation();
 	}
 
@@ -169,7 +227,6 @@ public sealed class PlatformerPlayerController : Component
 		LockDepth();
 
 		Controller.Move();
-		UpdateFacing();
 		UpdateSafeGroundPosition();
 		CheckRespawn();
 	}
@@ -192,11 +249,53 @@ public sealed class PlatformerPlayerController : Component
 		lastSafeGroundPosition = position;
 	}
 
+	public bool EquipWeapon( PlatformerWeapon weapon )
+	{
+		if ( weapon is null )
+			return false;
+
+		if ( equippedWeapon == weapon )
+		{
+			ApplyWeaponAnimationState( weapon, true );
+			return true;
+		}
+
+		equippedWeapon?.Unequip();
+		equippedWeapon = weapon;
+		equippedWeapon.Equip( this );
+		ApplyWeaponAnimationState( equippedWeapon, true );
+		return true;
+	}
+
+	public void UnequipWeapon()
+	{
+		equippedWeapon?.Unequip();
+		equippedWeapon = null;
+		ApplyWeaponAnimationState( null, false );
+	}
+
+	public Vector3 GetWeaponAttackOrigin()
+	{
+		return GameObject.WorldPosition + MouseLookOriginOffset;
+	}
+
+	public Vector3 GetWeaponAimDirection()
+	{
+		var direction = lookDirection;
+		direction.y = 0.0f;
+
+		if ( direction.LengthSquared <= 0.001f )
+		{
+			direction = GetFacingRotation().Forward;
+			direction.y = 0.0f;
+		}
+
+		return direction.LengthSquared <= 0.001f ? Vector3.Forward : direction.Normal;
+	}
+
 	private float GetMoveInput()
 	{
-		// Keep movement strictly horizontal. The template input can put W/S into
-		// AnalogMove, so analog movement is opt-in. By default, only Left/Right
-		// actions move the player and W/S do nothing.
+
 		var input = UseAnalogMoveInput ? Input.AnalogMove.x : 0.0f;
 
 		if ( IsActionDown( RightAction ) ) input += 1.0f;
@@ -244,6 +343,72 @@ public sealed class PlatformerPlayerController : Component
 
 		velocity.y = 0.0f;
 		Controller.Velocity = velocity;
+	}
+
+	private void EquipStartingWeapon()
+	{
+		var weapon = StartingWeapon ?? DefaultMeleeWeapon;
+
+		if ( weapon is null )
+		{
+			weapon = CreateWeaponFromPrefab();
+		}
+
+		weapon ??= GameObject.Components.GetAll().OfType<PlatformerWeapon>().FirstOrDefault();
+
+		if ( weapon is null && AutoCreateDefaultMeleeWeapon )
+		{
+			DefaultMeleeWeapon = GameObject.Components.Create<PlatformerMeleeWeapon>();
+			weapon = DefaultMeleeWeapon;
+		}
+
+		if ( weapon is not null )
+		{
+			EquipWeapon( weapon );
+		}
+	}
+
+	private PlatformerWeapon CreateWeaponFromPrefab()
+	{
+		if ( !StartingWeaponPrefab.IsValid() )
+			return null;
+
+		if ( runtimeWeaponObject is not null && runtimeWeaponObject.IsValid() )
+		{
+			runtimeWeaponObject.Destroy();
+		}
+
+		runtimeWeaponObject = StartingWeaponPrefab.Clone( WorldTransform, name: $"{StartingWeaponPrefab.Name} Equipped" );
+		runtimeWeaponObject.Parent = GameObject;
+		runtimeWeaponObject.Enabled = true;
+
+		var weapon = runtimeWeaponObject.Components.GetAll().OfType<PlatformerWeapon>().FirstOrDefault();
+
+		if ( weapon is null )
+		{
+			var melee = runtimeWeaponObject.Components.Create<PlatformerMeleeWeapon>();
+			melee.CreateRuntimeVisual = false;
+			melee.WeaponVisual = runtimeWeaponObject;
+			weapon = melee;
+		}
+		else if ( weapon is PlatformerMeleeWeapon melee && !melee.WeaponVisual.IsValid() )
+		{
+			melee.CreateRuntimeVisual = false;
+			melee.WeaponVisual = runtimeWeaponObject;
+		}
+
+		return weapon;
+	}
+
+	private void UpdateWeaponInput()
+	{
+		if ( equippedWeapon is null )
+			return;
+
+		if ( IsActionPressed( AttackAction ) )
+		{
+			equippedWeapon.TryPrimaryAttack();
+		}
 	}
 
 	private void ApplyGravity()
@@ -303,9 +468,6 @@ public sealed class PlatformerPlayerController : Component
 		velocity.z = 0.0f;
 		Controller.Velocity = velocity;
 
-		// CharacterController.Punch disconnects us from the ground before adding vertical speed.
-		// Directly setting Velocity while still grounded can play the animation but get cancelled
-		// by the controller's ground resolution on the same fixed tick.
 		if ( UseCharacterControllerPunchForJump )
 		{
 			Controller.Punch( Vector3.Up * JumpSpeed );
@@ -362,16 +524,102 @@ public sealed class PlatformerPlayerController : Component
 
 	private void UpdateFacing()
 	{
-		if ( MathF.Abs( moveInput ) >= 0.01f )
+		var hasMouseLook = FaceMousePosition && TryUpdateMouseLookDirection();
+
+		if ( !hasMouseLook )
 		{
-			facing = MathF.Sign( moveInput );
+			if ( MathF.Abs( moveInput ) >= 0.01f )
+			{
+				facing = MathF.Sign( moveInput );
+			}
+
+			lookDirection = GetFacingRotation().Forward;
 		}
 
-		if ( !FaceMoveDirection )
+		if ( !hasMouseLook && !FaceMoveDirection )
 			return;
 
 		var target = VisualRoot ?? GameObject;
 		target.WorldRotation = GetFacingRotation();
+	}
+
+	private bool TryUpdateMouseLookDirection()
+	{
+		if ( !hasMouseWorldSample )
+			return false;
+
+		var lookOrigin = GameObject.WorldPosition + MouseLookOriginOffset;
+		var direction = mouseWorldPoint - lookOrigin;
+		direction.y = 0.0f;
+
+		if ( direction.LengthSquared <= 0.001f )
+			return false;
+
+		lookDirection = direction.Normal;
+
+		if ( MathF.Abs( direction.x ) > MouseFacingDeadZone )
+		{
+			facing = MathF.Sign( direction.x );
+		}
+
+		return true;
+	}
+
+	private void UpdateMouseSample()
+	{
+		hasMouseScreenSample = TryGetMouseScreenSample( out mouseScreenPosition, out mouseScreenDelta );
+		hasMouseWorldSample = hasMouseScreenSample && TryGetMousePointOnGameplayPlane( mouseScreenPosition, out mouseWorldPoint );
+	}
+
+	private bool TryGetMouseScreenSample( out Vector2 position, out Vector2 delta )
+	{
+		position = default;
+		delta = default;
+
+		var screenSize = Screen.Size;
+
+		if ( screenSize.x <= 1.0f || screenSize.y <= 1.0f )
+			return false;
+
+		position = new Vector2(
+			Math.Clamp( Mouse.Position.x, 0.0f, screenSize.x - 1.0f ),
+			Math.Clamp( Mouse.Position.y, 0.0f, screenSize.y - 1.0f )
+		);
+
+		var center = screenSize * 0.5f;
+		var halfWidth = MathF.Max( center.x, 1.0f );
+		var halfHeight = MathF.Max( center.y, 1.0f );
+
+		delta = new Vector2(
+			Math.Clamp( (position.x - center.x) / halfWidth, -1.0f, 1.0f ),
+			Math.Clamp( (center.y - position.y) / halfHeight, -1.0f, 1.0f )
+		);
+
+		return true;
+	}
+
+	private bool TryGetMousePointOnGameplayPlane( Vector2 screenPosition, out Vector3 point )
+	{
+		point = default;
+
+		var camera = CameraTarget?.Components.Get<CameraComponent>() ?? Scene?.Camera;
+
+		if ( camera is null )
+			return false;
+
+		var ray = camera.ScreenPixelToRay( screenPosition );
+
+		if ( MathF.Abs( ray.Forward.y ) <= 0.0001f )
+			return false;
+
+		var distance = (LockedDepthY - ray.Position.y) / ray.Forward.y;
+
+		if ( distance < 0.0f )
+			return false;
+
+		point = ray.Project( distance );
+		point.y = LockedDepthY;
+		return true;
 	}
 
 	private Rotation GetFacingRotation()
@@ -416,10 +664,52 @@ public sealed class PlatformerPlayerController : Component
 
 		AnimationHelper.WithWishVelocity( wishVelocity );
 		AnimationHelper.WithVelocity( Controller.Velocity );
-		AnimationHelper.WithLook( GetFacingRotation().Forward );
+		AnimationHelper.WithLook( lookDirection );
 		AnimationHelper.IsGrounded = IsGrounded;
 		AnimationHelper.MoveStyle = IsRunActive ? CitizenAnimationHelper.MoveStyles.Run : CitizenAnimationHelper.MoveStyles.Walk;
 		AnimationHelper.DuckLevel = animationDuckLevel;
+	}
+
+	public void ApplyWeaponAnimationState( PlatformerWeapon weapon, bool triggerDeploy )
+	{
+		if ( !UseCitizenAnimation || AnimationHelper is null || !AnimationHelper.Target.IsValid() )
+			return;
+
+		AnimationHelper.HoldType = weapon?.CitizenHoldType ?? CitizenAnimationHelper.HoldTypes.None;
+		AnimationHelper.Handedness = weapon?.CitizenHandedness ?? CitizenAnimationHelper.Hand.Right;
+		AnimationHelper.IsWeaponLowered = weapon is null;
+
+		if ( weapon is not null && triggerDeploy )
+		{
+			AnimationHelper.TriggerDeploy();
+		}
+	}
+
+	public void TriggerWeaponAttackAnimation( CitizenAnimationHelper.HoldTypes holdType )
+	{
+		if ( !UseCitizenAnimation || AnimationHelper is null || !AnimationHelper.Target.IsValid() )
+			return;
+
+		AnimationHelper.HoldType = holdType;
+		AnimationHelper.IsWeaponLowered = false;
+		AnimationHelper.Target.Set( "b_attack", true );
+		AnimationHelper.Target.Set( "b_attack_primary", true );
+	}
+
+	public void SetWeaponAttackAnimationState( bool attacking, float progress )
+	{
+		if ( !UseCitizenAnimation || AnimationHelper is null || !AnimationHelper.Target.IsValid() )
+			return;
+
+		AnimationHelper.Target.Set( "b_attack", attacking );
+		AnimationHelper.Target.Set( "b_attack_primary", attacking );
+		AnimationHelper.Target.Set( "attack", Math.Clamp( progress, 0.0f, 1.0f ) );
+		AnimationHelper.Target.Set( "attack_progress", Math.Clamp( progress, 0.0f, 1.0f ) );
+	}
+
+	public void ClearWeaponAttackAnimation()
+	{
+		SetWeaponAttackAnimationState( false, 0.0f );
 	}
 
 	private void UpdateCamera( bool snap )
@@ -429,16 +719,15 @@ public sealed class PlatformerPlayerController : Component
 
 		var lookT = snap ? 1.0f : 1.0f - MathF.Exp( -CameraLookAheadSharpness * Time.Delta );
 		smoothedCameraLookAhead += (facing * CameraLookAhead - smoothedCameraLookAhead) * lookT;
+		var hasMouseCamera = MouseCameraEnabled && hasMouseScreenSample;
+		var mouseCameraOffset = UpdateMouseCameraOffset( hasMouseCamera ? GetMouseCameraTargetOffset() : Vector3.Zero, snap );
 
 		var verticalVelocity = Controller?.Velocity.z ?? 0.0f;
 		var verticalLookAhead = Math.Clamp( verticalVelocity * 0.05f, -CameraVerticalLookAhead, CameraVerticalLookAhead );
-		var desiredFocus = GameObject.WorldPosition + CameraFocusOffset + new Vector3( smoothedCameraLookAhead, 0.0f, verticalLookAhead );
+		var horizontalFocusOffset = hasMouseCamera ? mouseCameraOffset : new Vector3( smoothedCameraLookAhead, 0.0f, 0.0f );
+		var desiredFocus = GameObject.WorldPosition + CameraFocusOffset + horizontalFocusOffset + new Vector3( 0.0f, 0.0f, verticalLookAhead );
 		var desiredPosition = desiredFocus + CameraOffset;
 
-		// A side-view platformer camera should follow the player on the gameplay plane,
-		// then look back at a focus point on the body. The old camera used a large X
-		// offset and a fixed rotation, which could push the player to the top/edge of
-		// the screen and eventually lose them while moving.
 		if ( !snap && hasMovedCameraOnce )
 		{
 			var delta = desiredPosition - CameraTarget.WorldPosition;
@@ -458,6 +747,79 @@ public sealed class PlatformerPlayerController : Component
 		var t = 1.0f - MathF.Exp( -CameraFollowSharpness * Time.Delta );
 		CameraTarget.WorldPosition += (desiredPosition - CameraTarget.WorldPosition) * t;
 		UpdateCameraRotation( desiredFocus );
+	}
+
+	private Vector3 GetMouseCameraTargetOffset()
+	{
+		var cameraDelta = new Vector2(
+			ApplyDeadZone( mouseScreenDelta.x, MouseCameraScreenDeadZone.x ),
+			ApplyDeadZone( mouseScreenDelta.y, MouseCameraScreenDeadZone.y )
+		);
+
+		return new Vector3(
+			cameraDelta.x * MathF.Max( 0.0f, MouseCameraMaxOffset.x ),
+			0.0f,
+			cameraDelta.y * MathF.Max( 0.0f, MouseCameraMaxOffset.y )
+		);
+	}
+
+	private Vector3 UpdateMouseCameraOffset( Vector3 targetOffset, bool snap )
+	{
+		if ( snap )
+		{
+			smoothedMouseCameraOffset = targetOffset;
+			return smoothedMouseCameraOffset;
+		}
+
+		var sharpness = targetOffset.LengthSquared < smoothedMouseCameraOffset.LengthSquared
+			? MouseCameraReturnSharpness
+			: MouseCameraSharpness;
+
+		if ( sharpness <= 0.0f )
+		{
+			smoothedMouseCameraOffset = targetOffset;
+			return smoothedMouseCameraOffset;
+		}
+
+		var t = 1.0f - MathF.Exp( -sharpness * Time.Delta );
+		smoothedMouseCameraOffset += (targetOffset - smoothedMouseCameraOffset) * t;
+		return smoothedMouseCameraOffset;
+	}
+
+	private void EnsureAimReticle()
+	{
+		if ( AimReticle is not null || !ShowScreenReticle )
+			return;
+
+		runtimeReticleObject = new GameObject( true, "Platformer Aim Reticle" );
+		runtimeReticleObject.GetOrAddComponent<ScreenPanel>();
+		AimReticle = runtimeReticleObject.GetOrAddComponent<PlatformerAimReticle>();
+	}
+
+	private void UpdateReticle( bool allowVisible = true )
+	{
+		if ( !ShowScreenReticle )
+		{
+			if ( AimReticle is not null )
+			{
+				AimReticle.IsVisible = false;
+			}
+
+			return;
+		}
+
+		EnsureAimReticle();
+
+		if ( HideSystemCursorForReticle )
+		{
+			Mouse.Visibility = MouseVisibility.Auto;
+		}
+
+		if ( AimReticle is null )
+			return;
+
+		AimReticle.Position = mouseScreenPosition;
+		AimReticle.IsVisible = allowVisible && hasMouseScreenSample;
 	}
 
 	private void UpdateCameraRotation( Vector3 focusPoint )
@@ -516,5 +878,16 @@ public sealed class PlatformerPlayerController : Component
 			return target;
 
 		return current + MathF.Sign( target - current ) * maxDelta;
+	}
+
+	private static float ApplyDeadZone( float value, float deadZone )
+	{
+		deadZone = Math.Clamp( deadZone, 0.0f, 0.99f );
+		var magnitude = MathF.Abs( value );
+
+		if ( magnitude <= deadZone )
+			return 0.0f;
+
+		return MathF.Sign( value ) * Math.Clamp( (magnitude - deadZone) / (1.0f - deadZone), 0.0f, 1.0f );
 	}
 }

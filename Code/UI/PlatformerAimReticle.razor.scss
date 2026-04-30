@@ -1,0 +1,48 @@
+PlatformerAimReticle {
+	position: absolute;
+	width: 100%;
+	height: 100%;
+	pointer-events: none;
+
+	.platformer-aim-reticle {
+		position: absolute;
+		width: 24px;
+		height: 24px;
+		transform: translate( -50%, -50% );
+		opacity: 0;
+		transition: opacity 80ms ease;
+		pointer-events: none;
+	}
+
+	.platformer-aim-reticle.visible {
+		opacity: 1;
+	}
+
+	.reticle-line,
+	.reticle-core {
+		position: absolute;
+		left: 50%;
+		top: 50%;
+		transform: translate( -50%, -50% );
+		background-color: rgba( 255, 255, 255, 0.92 );
+		box-shadow: 0 0 4px rgba( 0, 0, 0, 0.55 );
+	}
+
+	.reticle-line.horizontal {
+		width: 20px;
+		height: 2px;
+	}
+
+	.reticle-line.vertical {
+		width: 2px;
+		height: 20px;
+	}
+
+	.reticle-core {
+		width: 5px;
+		height: 5px;
+		border-radius: 50%;
+		background-color: rgba( 24, 30, 34, 0.86 );
+		border: 1px solid rgba( 255, 255, 255, 0.95 );
+	}
+}
